@@ -1,4 +1,4 @@
-package httpdelivery
+package httpDelivery
 
 import (
 	"context"
