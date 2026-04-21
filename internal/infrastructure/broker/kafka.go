@@ -17,20 +17,32 @@ type testCommand struct {
 }
 
 type Broker struct {
-	writer kafka.Writer
+	commandWriter kafka.Writer
+	metricsWriter kafka.Writer
 }
 
-func NewBroker(addr string, topicName string, requiredAcks kafka.RequiredAcks, maxAttempts int, writeTimeout time.Duration) Broker {
-	writer := kafka.Writer{
+func NewBroker(addr string, cmdTopic, metricsTopic string) Broker {
+	cmdWriter := kafka.Writer{
 		Addr:         kafka.TCP(addr),
-		Topic:        topicName,
+		Topic:        cmdTopic,
 		Balancer:     &kafka.LeastBytes{},
-		RequiredAcks: requiredAcks,
-		MaxAttempts:  maxAttempts,
-		WriteTimeout: writeTimeout,
+		RequiredAcks: kafka.RequireAll,
+		Async:        false,
 	}
 
-	return Broker{writer: writer}
+	metWriter := kafka.Writer{
+		Addr:         kafka.TCP(addr),
+		Topic:        metricsTopic,
+		Balancer:     &kafka.Hash{},
+		Async:        true,
+		BatchSize:    100,
+		BatchTimeout: 500 * time.Millisecond,
+	}
+
+	return Broker{
+		commandWriter: cmdWriter,
+		metricsWriter: metWriter,
+	}
 }
 
 func (b *Broker) SendStart(ctx context.Context, test domain.Test) error {
@@ -40,7 +52,7 @@ func (b *Broker) SendStart(ctx context.Context, test domain.Test) error {
 		return fmt.Errorf("%w: failed to marshal start command: %v", domain.ErrInternal, err)
 	}
 
-	if err := b.writer.WriteMessages(ctx, kafka.Message{
+	if err := b.commandWriter.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(test.ID.String()),
 		Value: data,
 	}); err != nil {
@@ -57,11 +69,27 @@ func (b *Broker) SendStop(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("%w: failed to marshal stop command: %v", domain.ErrInternal, err)
 	}
 
-	if err := b.writer.WriteMessages(ctx, kafka.Message{
+	if err := b.commandWriter.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(id.String()),
 		Value: data,
 	}); err != nil {
 		return fmt.Errorf("%w: failed to write stop message: %v", domain.ErrInternal, err)
+	}
+
+	return nil
+}
+
+func (b *Broker) SendMetrics(ctx context.Context, metric domain.Metric) error {
+	data, err := json.Marshal(metric)
+	if err != nil {
+		return fmt.Errorf("%w: failed to marshal metric: %v", domain.ErrInternal, err)
+	}
+
+	if err := b.metricsWriter.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(metric.TestID.String()),
+		Value: data,
+	}); err != nil {
+		return fmt.Errorf("%w: failed to write metric message: %v", domain.ErrInternal, err)
 	}
 
 	return nil

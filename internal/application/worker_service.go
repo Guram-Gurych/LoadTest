@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/Guram-Gurych/LoadTest/internal/domain"
 	"github.com/google/uuid"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -16,14 +17,19 @@ type requestResult struct {
 	Err        error
 }
 
+type metricsBroker interface {
+	SendMetrics(ctx context.Context, metric domain.Metric) error
+}
+
 type workerService struct {
 	mapTest map[uuid.UUID]context.CancelFunc
 	mut     sync.RWMutex
 	client  *http.Client
 	ch      chan requestResult
+	metrics metricsBroker
 }
 
-func NewWorkerService() workerService {
+func NewWorkerService(metrics metricsBroker) workerService {
 	mapTest := make(map[uuid.UUID]context.CancelFunc)
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -35,7 +41,7 @@ func NewWorkerService() workerService {
 	}
 	ch := make(chan requestResult)
 
-	return workerService{mapTest: mapTest, client: client, ch: ch}
+	return workerService{mapTest: mapTest, client: client, ch: ch, metrics: metrics}
 }
 
 func (w *workerService) StartTest(parentCtx context.Context, test domain.Test) {
@@ -99,4 +105,61 @@ func (w *workerService) StopTest(ctx context.Context, id uuid.UUID) error {
 	}
 
 	return domain.ErrNotFound
+}
+
+type stats struct {
+	total    int
+	success  int
+	errors   int
+	totalDur time.Duration
+}
+
+func (w *workerService) collectMetrics(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	current := make(map[uuid.UUID]*stats)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case res := <-w.ch:
+			s, ok := current[res.TestID]
+			if !ok {
+				s = &stats{}
+				current[res.TestID] = s
+			}
+
+			s.total++
+			if res.Err != nil || res.StatusCode >= 400 {
+				s.errors++
+			} else {
+				s.success++
+			}
+
+			s.totalDur += res.Duration
+
+		case <-ticker.C:
+			for testID, s := range current {
+				if s.total == 0 {
+					continue
+				}
+
+				metric := domain.Metric{
+					TestID:        testID,
+					BucketTime:    time.Now().Truncate(time.Second),
+					RequestsCount: s.total,
+					SuccessCount:  s.success,
+					ErrorCount:    s.errors,
+					AVGLatencyMs:  float64(s.totalDur.Milliseconds()) / float64(s.total),
+				}
+
+				err := w.metrics.SendMetrics(ctx, metric)
+				if err != nil {
+					log.Printf("failed to send metrics: %v", err)
+				}
+			}
+
+			current = make(map[uuid.UUID]*stats)
+		}
+	}
 }
