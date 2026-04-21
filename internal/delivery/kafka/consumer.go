@@ -51,7 +51,7 @@ func (c *Consumer) Run(ctx context.Context) {
 	go c.readLoop(ctx)
 }
 
-func (c *Consumer) readloop(ctx context.Context) {
+func (c *Consumer) readLoop(ctx context.Context) {
 	defer close(c.commands)
 
 	for {
@@ -104,7 +104,5 @@ func (c *Consumer) processCommand(ctx context.Context, cmd testCommand) {
 		c.service.StopTest(ctx, cmd.TestID)
 	default:
 		log.Printf("Unknown action: %s", cmd.Action)
-	}
-
 	}
 }
